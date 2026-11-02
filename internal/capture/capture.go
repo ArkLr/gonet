@@ -2,20 +2,61 @@ package capture
 
 import (
 	"net"
+	"net/netip"
 	"time"
 
 	"github.com/gopacket/gopacket"
 	"github.com/gopacket/gopacket/layers"
 )
 
+type Direction string
+
+const (
+	DirIn      Direction = "in"
+	DirOut     Direction = "out"
+	DirUnknown Direction = "unknown"
+)
+
 type PacketInfo struct {
 	Timestamp       time.Time
-	SourceIP        net.IP
-	DestinationIP   net.IP
+	SourceIP        netip.Addr
+	DestinationIP   netip.Addr
 	SourcePort      int
 	DestinationPort int
 	Protocol        string
 	Length          int
+	Direction       Direction
+}
+
+type Stats struct {
+	BytesIn    uint64
+	BytesOut   uint64
+	PacketsIn  uint64
+	PacketsOut uint64
+}
+
+func NewLocalSet(local []net.IP) map[netip.Addr]struct{} {
+	set := make(map[netip.Addr]struct{}, len(local))
+	for _, ip := range local {
+		if a, ok := netip.AddrFromSlice(ip); ok {
+			set[a.Unmap()] = struct{}{}
+		}
+	}
+	return set
+}
+
+func GetDirection(src, dst netip.Addr, local map[netip.Addr]struct{}) Direction {
+	_, srcLocal := local[src.Unmap()]
+	_, dstLocal := local[dst.Unmap()]
+
+	switch {
+	case dstLocal:
+		return DirIn
+	case srcLocal:
+		return DirOut
+	default:
+		return DirUnknown
+	}
 }
 
 func Parse(p gopacket.Packet) (PacketInfo, bool) {
@@ -23,14 +64,26 @@ func Parse(p gopacket.Packet) (PacketInfo, bool) {
 	if ipLayer == nil {
 		return PacketInfo{}, false
 	}
-	ip := ipLayer.(*layers.IPv4)
+	ip, ok := ipLayer.(*layers.IPv4)
+	if !ok {
+		return PacketInfo{}, false
+	}
+
+	src, ok := netip.AddrFromSlice(ip.SrcIP)
+	if !ok {
+		return PacketInfo{}, false
+	}
+	dst, ok := netip.AddrFromSlice(ip.DstIP)
+	if !ok {
+		return PacketInfo{}, false
+	}
 
 	info := PacketInfo{
 		Timestamp:     p.Metadata().Timestamp,
-		SourceIP:      ip.SrcIP,
-		DestinationIP: ip.DstIP,
+		SourceIP:      src.Unmap(),
+		DestinationIP: dst.Unmap(),
 		Protocol:      ip.Protocol.String(),
-		Length:        len(p.Data()),
+		Length:        p.Metadata().Length,
 	}
 
 	if tcpLayer := p.Layer(layers.LayerTypeTCP); tcpLayer != nil {

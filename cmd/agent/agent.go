@@ -3,6 +3,9 @@ package main
 import (
 	"fmt"
 	"log"
+	"net"
+	"sync/atomic"
+	"time"
 
 	"github.com/Arklr/gonet/internal/capture"
 	"github.com/gopacket/gopacket"
@@ -11,6 +14,13 @@ import (
 )
 
 func main() {
+	localIPs, err := LocalIPs("enp5s0")
+	if err != nil {
+		log.Fatalf("failed to load local IPs: %v", err)
+	}
+	fmt.Println("Local IPs:", localIPs)
+
+	localSet := capture.NewLocalSet(localIPs)
 
 	tPacket, err := afpacket.NewTPacket(
 		afpacket.OptInterface("enp5s0"),
@@ -22,25 +32,82 @@ func main() {
 
 	fmt.Println("Capturing packets via PACKET_MMAP...")
 
-	for {
-		data, ci, err := tPacket.ReadPacketData()
-		if err != nil {
-			log.Printf("Error reading packet: %v", err)
-			continue
-		}
+	packets := make(chan capture.PacketInfo, 1000)
+	var dropped atomic.Uint64
 
-		gp := gopacket.NewPacket(data, layers.LayerTypeEthernet, gopacket.Default)
-		gp.Metadata().CaptureInfo = ci
-		info, ok := capture.Parse(gp)
+	// Capture goroutine: read, parse, classify, send without blocking.
+	go func() {
+		for {
+			data, ci, err := tPacket.ReadPacketData()
+			if err != nil {
+				log.Printf("Error reading packet: %v", err)
+				continue
+			}
+
+			gp := gopacket.NewPacket(data, layers.LayerTypeEthernet, gopacket.Default)
+			gp.Metadata().CaptureInfo = ci
+
+			info, ok := capture.Parse(gp)
+			if !ok {
+				continue
+			}
+			info.Direction = capture.GetDirection(info.SourceIP, info.DestinationIP, localSet)
+
+			select {
+			case packets <- info:
+			default:
+				dropped.Add(1)
+			}
+		}
+	}()
+
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+
+	var stats capture.Stats
+
+	for {
+		select {
+		case info := <-packets:
+			switch info.Direction {
+			case capture.DirIn:
+				stats.PacketsIn++
+				stats.BytesIn += uint64(info.Length)
+			case capture.DirOut:
+				stats.PacketsOut++
+				stats.BytesOut += uint64(info.Length)
+			}
+
+		case <-ticker.C:
+			fmt.Printf("in: %.1f KB/s (%d pkts)   out: %.1f KB/s (%d pkts)   dropped: %d\n",
+				float64(stats.BytesIn)/1024, stats.PacketsIn,
+				float64(stats.BytesOut)/1024, stats.PacketsOut,
+				dropped.Swap(0),
+			)
+			stats = capture.Stats{}
+		}
+	}
+}
+
+func LocalIPs(ifaceName string) ([]net.IP, error) {
+	iface, err := net.InterfaceByName(ifaceName)
+	if err != nil {
+		return nil, fmt.Errorf("interface %q: %w", ifaceName, err)
+	}
+
+	addrs, err := iface.Addrs()
+	if err != nil {
+		return nil, fmt.Errorf("addresses of %q: %w", ifaceName, err)
+	}
+
+	var ips []net.IP
+	for _, addr := range addrs {
+		ipNet, ok := addr.(*net.IPNet)
 		if !ok {
 			continue
 		}
-		fmt.Printf("%s  %s:%d → %s:%d  %s  %d\n",
-			info.Timestamp.Format("15:04:05.000"),
-			info.SourceIP, info.SourcePort,
-			info.DestinationIP, info.DestinationPort,
-			info.Protocol,
-			info.Length,
-		)
+		ips = append(ips, ipNet.IP)
 	}
+
+	return ips, nil
 }
