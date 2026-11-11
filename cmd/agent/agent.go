@@ -14,7 +14,9 @@ import (
 )
 
 func main() {
-	localIPs, err := LocalIPs("enp5s0")
+	var iface = "wlp1s0"
+
+	localIPs, err := LocalIPs(iface)
 	if err != nil {
 		log.Fatalf("failed to load local IPs: %v", err)
 	}
@@ -23,7 +25,7 @@ func main() {
 	localSet := capture.NewLocalSet(localIPs)
 
 	tPacket, err := afpacket.NewTPacket(
-		afpacket.OptInterface("enp5s0"),
+		afpacket.OptInterface(iface),
 	)
 	if err != nil {
 		log.Fatalf("Failed to setup afpacket socket: %v", err)
@@ -37,27 +39,43 @@ func main() {
 
 	// Capture goroutine: read, parse, classify, send without blocking.
 	go func() {
+		backoff := time.Second
+
 		for {
-			data, ci, err := tPacket.ReadPacketData()
+			handle, err := afpacket.NewTPacket(afpacket.OptInterface(iface))
 			if err != nil {
-				log.Printf("Error reading packet: %v", err)
+				log.Printf("Open failed: %v, retrying in %s", err, backoff)
+				time.Sleep(backoff)
+				backoff = min(backoff*2, 30*time.Second)
 				continue
 			}
 
-			gp := gopacket.NewPacket(data, layers.LayerTypeEthernet, gopacket.Default)
-			gp.Metadata().CaptureInfo = ci
+			backoff = time.Second
+			log.Printf("capture running on %s", iface)
+			for {
 
-			info, ok := capture.Parse(gp)
-			if !ok {
-				continue
-			}
-			info.Direction = capture.GetDirection(info.SourceIP, info.DestinationIP, localSet)
+				data, ci, err := handle.ReadPacketData()
+				if err != nil {
+					log.Printf("Error reading packet: %v", err)
+					break
+				}
 
-			select {
-			case packets <- info:
-			default:
-				dropped.Add(1)
+				gp := gopacket.NewPacket(data, layers.LayerTypeEthernet, gopacket.Default)
+				gp.Metadata().CaptureInfo = ci
+
+				info, ok := capture.Parse(gp)
+				if !ok {
+					continue
+				}
+				info.Direction = capture.GetDirection(info.SourceIP, info.DestinationIP, localSet)
+
+				select {
+				case packets <- info:
+				default:
+					dropped.Add(1)
+				}
 			}
+			handle.Close()
 		}
 	}()
 
