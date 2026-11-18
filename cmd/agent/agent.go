@@ -14,7 +14,7 @@ import (
 )
 
 func main() {
-	var iface = "enp5s0"
+	var iface = "wlp1s0"
 
 	localIPs, err := LocalIPs(iface)
 	if err != nil {

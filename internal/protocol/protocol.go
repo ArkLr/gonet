@@ -52,6 +52,30 @@ type PacketMsg struct {
 	Direction string     `json:"dir"` // "in", "out", "unknown"
 }
 
+func NewStats(s StatsMsg) Message {
+	return Message{
+		Version: version,
+		Type:    TypeStats,
+		Stats:   &s,
+	}
+}
+
+func NewHello(h HelloMsg) Message {
+	return Message{
+		Version: version,
+		Type:    TypeHello,
+		Hello:   &h,
+	}
+}
+
+func NewPacket(p PacketMsg) Message {
+	return Message{
+		Version: version,
+		Type:    TypePacket,
+		Packet:  &p,
+	}
+}
+
 func (m Message) Validate() error {
 	if m.Version != version {
 		return fmt.Errorf("version mismatch: got %d, want %d", m.Version, version)
@@ -71,7 +95,7 @@ func (m Message) Validate() error {
 		}
 
 	default:
-		return fmt.Errorf("unkown message type %q", m.Type)
+		return fmt.Errorf("unknown message type %q", m.Type)
 	}
 	return nil
 }
